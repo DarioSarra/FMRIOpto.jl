@@ -38,8 +38,8 @@ fulldata.Time = fulldata.Frame .+ 3
 fdata = filter(r ->
     r.Area != "PIR" &&
     r.Area != "OT" &&
-    # r.Area != "Ent" &&
     r.Valid_frs,
+    # r.Area != "Ent" &&
     # r.Mouse != "FM14",
     fulldata)
     # lvA = union(fdata.Area)
