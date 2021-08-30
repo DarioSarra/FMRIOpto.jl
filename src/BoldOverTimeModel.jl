@@ -54,7 +54,19 @@ df0 = combine(gd0) do dd
         return dd[i:end,:]
     end
 end
-
+##
+f0 = @formula(Bold ~ 1 + Time + Concentration + Area + (1+Time|Mouse+Area))
+f1 = @formula(Bold ~ 1 + Time + Concentration + Area + Stim + Concentration & Area + Concentration & Area & Stim + (1+Time|Mouse))
+f2 = @formula(Bold ~ 1 + Time + Concentration*Area*Stim + (1+Time|Mouse+Area))
+df1 = filter(r -> !(r.Area in ["pPIR", "OT", "NDB", "LHA", "COA"]) &&
+    r.Concentration != 0.0001,
+    # r.Mouse != "FM14",
+    df0)
+df1.Bold = df1.BOLD_90
+m0 = fit(MixedModel, f0,df1)
+m1 = fit(MixedModel, f1,df1)
+m2 = fit(MixedModel, f2,df1)
+##
 df1 = filter(r -> r.Genotype == "sert" &&
     r.Concentration != 0.0001,
     # r.Mouse != "FM14",
