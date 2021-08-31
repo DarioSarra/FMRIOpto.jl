@@ -7,6 +7,7 @@ module FMRIOpto
 
 include("functions.jl")
 
-export analyze_bold, max_bold, average_boldtime
+export nanmean, nansem, safemean, safesem
+export plot_bold, defineBold
 
 end # module
