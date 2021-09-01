@@ -9,6 +9,6 @@ include("utilities.jl")
 include("functions.jl")
 
 export nanmean, nansem, safemean, safesem, iscolumn, model_res
-export average_presentation, define_bold, plot_bold, odour_response, stim_interaction
+export average_presentation, define_bold, plot_bold, odour_response, stim_interaction, analysis_bold
 
 end # module
