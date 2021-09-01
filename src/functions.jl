@@ -1,56 +1,57 @@
-nanmean(x) = mean(filter(!isnan,x))
-nanmean(x,y) = mapslices(nanmean,x,y)
-nansem(x) = sem(filter(!isnan,x))
-nansem(x,y) = mapslices(nansem,x,y)
-
-function safemean(x)
-    if sum(.!(isnan.(x))) < 4
-        return NaN
-    else
-        return nanmean(x)
-    end
-end
-
-function safesem(x)
-    if sum(.!(isnan.(x))) < 4
-        return NaN
-    else
-        return nansem(x)
-    end
-end
-##
 """
-   definBold(df, signal; method = :Max, pick_to = :all, nmax = 4, window = 4:10, nanmath = true)
-It adjust the Bold in column signal per genotype, mouse, stim, area and concentration
-according to different algorythms define by method options listed below
-    :Pick = take all values after the pick until the index define by pick_to
-        if pick_to == :all takes all values available
-    :Max = take the highest n values defined by nmax, default = 4
-    :Window = averages over the time points specified by window, default = 4:10
+   defineBold(df, signal; method = :Max, pick_to = :all, nmax = 4, window = 4:10, nanmath = true)
+It adjust the Bold signal per genotype, mouse, stim, area and concentration
+according to different algorythms define by method option.
+:Pick = take all values after the pick until the index define by pick_to
+    if pick_to == :all takes all values available (goes over every presentation
+    if the presentation where not averaged before)
+:Max = take the highest n values defined by nmax, default = 4
+:Window = averages over the time points specified by window, default = 4:10
 nanmath: if true (default) uses safemean and safe sem to calculate mean and sem,
 else it uses regular mean and sem
 
 """
-
-function defineBold(df, signal; method = :Pick, pick_to = :all, nmax = 4, window = 4:10, nanmath = true)
+function define_bold(df0, signal; av_pres = false, method = :Pick, pick_to = :all, nmax = 4, window = 4:10, nanmath = true)
     fmean, fsem = nanmath ? (safemean, safesem) : (mean, sem)
-    gd0 = groupby(df,[:Genotype, :Mouse, :Stim, :Area, :Concentration])
     if method == :Pick
-        df0 = pick_bold(gd0, signal; pick_to = pick_to)
-        df0.Bold = df0[:,signal]
+        if av_pres
+            #average response over presentation
+            df1 = average_presentation(df0,signal; nanmath = nanmath)
+            signal = :Bold
+            gd1 = groupby(df1,[:Genotype, :Mouse, :Stim, :Area, :Concentration])
+        else
+            #change groupby to find pick for each presentation
+            gd1 = groupby(df0,[:Genotype, :Mouse, :Stim, :Area, :Concentration,:Repetition_nr])
+        end
+        #find pick in the bold signal and take all value from there until pick_to
+        df2 = pick_bold(gd1, signal; pick_to = pick_to)
+        df2.Bold = df2[:,signal]
     elseif method == :Max
-        df0 = combine(gd0, signal => (s -> max_bold(s; max = nmax, nanmath = nanmath)) => :Bold)
+        #average response over all presentation
+        df1 = average_presentation(df0,signal; nanmath = nanmath)
+        gd1 = groupby(df1,[:Genotype, :Mouse, :Stim, :Area, :Concentration])
+        #find the first n max values in the bold signal
+        df2 = combine(gd1, signal => (s -> max_bold(s; max = nmax, nanmath = nanmath)) => :Bold)
     elseif method == :Window
-        df0 = combine(gd0, [signal, :Time] =>((s,t) -> window_bold(s,t; window = window, nanmath = nanmath)) => :Bold)
+        #average all bold values per mouse and concentration in a time window
+        gd0 = groupby(df0,[:Genotype, :Mouse, :Stim, :Area, :Concentration])
+        df2 = combine(gd1, [signal, :Time] =>((s,t) -> window_bold(s,t; window = window, nanmath = nanmath)) => :Bold)
     else
         error("unrecognised bold processing method:/n options are :Pick, :Max, :Timewindow")
     end
-    return df0
+    return df2
+end
+
+function average_presentation(df0,signal; nanmath = true)
+    fmean, fsem = nanmath ? (safemean, safesem) : (mean, sem)
+    df0[:,signal] = [ismissing(x) ? NaN : x for x in df0[:,signal]]
+    df1 = combine(groupby(df0, [:Time,:Concentration,:Area,:Stim,:Mouse,:Genotype]), signal => fmean => :Bold)
+    return df1
 end
 
 function pick_bold(gd, signal; pick_to = :all)
     combine(gd) do dd
-        any(ismissing,dd[:,signal]) && println("got NaN ", dd.Mouse[1], " ", dd.Area[1], " ", dd.Stim[1], " ", dd.Concentration[1])
+        #any(ismissing,dd[:,signal]) && println("got NaN ", dd.Mouse[1], " ", dd.Area[1], " ", dd.Stim[1], " ", dd.Concentration[1])
         if all(ismissing.(dd[:,signal]))
             return filter(r -> r.Area == "NoData",dd)
         else
@@ -78,16 +79,30 @@ function window_bold(b,t; window = 4:10, nanmath = true)
     fmean(b1[index])
 end
 
-function plot_bold(df0,x; nanmath = true)
-    df1 = combine(groupby(df0,[:Mouse,:Area, :Stim, :Concentration]),  x .=> (t -> mean(skipmissing(t))) .=> x)
-    if nanmath
-        df = combine(groupby(df1,[:Area, :Stim, :Concentration]),  x .=> [safemean, safesem] .=>[:mean, :sem])
-    else
-        df = combine(groupby(df1,[:Area, :Stim, :Concentration]),  x .=> [mean, sem] .=>[:mean, :sem])
-    end
+"""
+    plot_bold(df0,x; nanmath = true)
+Function to check the average response over concentration per area.
+df0 has to be a dataframe preprocessed with define_bold,
+containing bold signal in a column named :Bold.
+returns a vector of plots of bold over concentration per each area,
+a dataframe with the mean and sem values of bold per area
+and a filtered list of the areas that contain sufficient data for further analysis
+"""
+
+function plot_bold(df0; nanmath = true, fconc = true)
+    fmean = nanmath ? safemean : mean
+    fsem = nanmath ? safesem : sem
+    #calculate mean repsonse over concentrations per area
+    df = combine(groupby(df0,[:Area, :Stim, :Concentration]),  :Bold .=> [fmean, fsem] .=>[:mean, :sem])
+    # identify regions with missing concentration info
+    res = combine(groupby(df,[:Area]), :mean => (m-> .!(any(isnan.(m)))) => :to_keep)
+    to_keep = filter(r -> r.to_keep, res)[:,:Area]
+    # prepare a grid plot with the results for each regions
     df.Color = [x ? :red : :black for x in df.Stim]
     posdict = Dict(v=>p for (v,p) in zip(union(df.Concentration), collect(1:length(union(df.Concentration)))))
     df.Pos = [get(posdict, x,0) for x in df.Concentration]
+    sort!(df,[:Stim,:Pos])
+    fconc && filter!(r -> r.Concentration != 0.0001 ,df)
     plt = []
         combine(groupby(df, :Area)) do dd
             pp = @df dd scatter(:Pos, :mean, yerror = :sem, group = :Stim, color = :Color,
@@ -96,6 +111,86 @@ function plot_bold(df0,x; nanmath = true)
             Plots.abline!(0,0,color = :black, linestyle = :dash)
             push!(plt,pp)
         end
-        #pp = plot(plt..., size = (600*1.5,1200*1.5))#layout = (6,3)
-    return plt, df
+    return plt, df, to_keep
+end
+
+"""
+    odour_response(df0, to_keep)
+Use control data to identify which areas show a dose dependent response to
+odour concentration with a mixed model.
+df0 has to be a dataframe preprocessed with define_bold,
+    containing bold signal in a column named :Bold.
+filt is a vector of string specifying which area to keep and which to filter
+    out from the analysis, default is :none which takes all areas
+"""
+
+function odour_response(df0; farea = :none, fconc = true)
+    # use only control data to determine odour concentration dose dependency
+    df1 = filter(r -> !r.Stim, df0)
+    #remove lowest concentration
+    fconc && filter!(r -> r.Concentration != 0.0001, df1)
+    # filters area with insufficient response, identified from plot_bold function
+    farea != :none && filter!(r -> r.Area in farea, df1)
+    # identify if the model requires to incorporate time
+    if iscolumn(df0,:Time)
+        f0 = @formula(Bold ~ 1 + Time + Concentration + (1+Time|Mouse))
+        f1 = @formula(Bold ~ 1 + Time + Concentration*Area + (1+Time|Mouse))
+    else
+        f0 = @formula(Bold ~ 1 + Concentration + (1|Mouse))
+        f1 = @formula(Bold ~ 1 + Concentration*Area + (1|Mouse))
+    end
+    #replace NaN values used for plotting to missing for model
+    df1.Bold = [isnan(x) ? missing : x for x in df1.Bold]
+    # model fit and test
+    m0 = fit(MixedModel, f0, df1)
+    m1 = fit(MixedModel, f1, df1)
+    mp = MixedModels.likelihoodratiotest(m0,m1)
+    # identifies area that significantly respond to odour concentration
+    res = DataFrame(Area = coefnames(m1), P = m1.pvalues, Z = m1.beta ./ m1.stderror)
+    res2 = filter!(r -> occursin("Concentration & Area: ", r.Area), res)
+    res2.Area = replace.(res2.Area, "Concentration & Area: " => "")
+    to_keep = filter(r -> r.P <= 0.049, res2)[:,:Area]
+
+    return m1, mp, to_keep
+end
+
+"""
+    stim_interaction(df0, farea; fconc = :none)
+Use  data to identify which areas show an interaction between dose dependent
+response to odour concentration and stimulation with a mixed model.
+df0 has to be a dataframe preprocessed with define_bold,
+    containing bold signal in a column named :Bold.
+farea is a vector of string specifying which areas showed a significant dose
+dependent response to odour concetration, found using odour_response function
+fconc allows to remove lowest concetration from the dataset
+"""
+function stim_interaction(df0, farea; fconc = true)
+    # filters area lacking concentration response identified by odour_response function
+    if fconc
+        df1 = filter(r -> r.Concentration != 0.0001 &&
+            r.Area in farea, df0)
+    else
+        df1 = filter(r -> r.Area in farea, df0)
+    end
+    # identify if the model requires to incorporate time
+    if iscolumn(df0,:Time)
+        f1 = @formula(Bold ~ 1 + Time + Concentration*Area + (1+Time|Mouse))
+        f2 = @formula(Bold ~ 1 + Time + Concentration + Area + Stim + Concentration & Area + Concentration & Area & Stim + (1+Time|Mouse))
+        f3 = @formula(Bold ~ 1 + Time + Concentration*Area*Stim + (1+Time|Mouse))
+    else
+        f1 = @formula(Bold ~ 1 + Concentration*Area + (1|Mouse))
+        f2 = @formula(Bold ~ 1 + Concentration + Area + Stim + Concentration & Area + Concentration & Area & Stim + (1|Mouse))
+        f3 = @formula(Bold ~ 1 + Concentration*Area*Stim + (1|Mouse))
+    end
+    #replace NaN values used for plotting to missing for model
+    df1.Bold = [isnan(x) ? missing : x for x in df1.Bold]
+    m1 = fit(MixedModel, f1,df1)
+    m2 = fit(MixedModel, f2,df1)
+    m3 = fit(MixedModel, f3,df1)
+    p_simple = MixedModels.likelihoodratiotest(m1,m2)
+    p_complex = MixedModels.likelihoodratiotest(m2,m3)
+    res = model_res(m2)
+    filter!(r -> occursin("Stim", r.Area), res)
+    sort!(res,:P)
+    return df1, m2, p_simple, p_complex, res
 end
