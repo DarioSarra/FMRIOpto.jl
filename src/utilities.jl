@@ -4,7 +4,7 @@ nansem(x) = sem(filter(!isnan,x))
 nansem(x,y) = mapslices(nansem,x,y)
 
 function safemean(x)
-    if sum(.!(isnan.(x))) < 4
+    if sum(.!(isnan.(x))) < 2
         return NaN
     else
         return nanmean(x)

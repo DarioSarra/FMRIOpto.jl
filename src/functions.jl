@@ -39,6 +39,9 @@ function define_bold(df0, signal; av_pres = false, method = :Peak, peak_to = :al
         gd1 = groupby(df1,[:Genotype, :Mouse, :Stim, :Area, :Concentration])
         signal = :Bold
         df2 = combine(gd1, [signal, :Time] =>((s,t) -> window_bold(s,t; window = window, nanmath = nanmath)) => :Bold)
+    elseif method == :None
+        df2 = filter(r->r.Time in window, df0)
+        df2.Bold = df2[:,signal]
     else
         error("unrecognised bold processing method:/n options are :Peak, :Max, :Timewindow")
     end
@@ -58,7 +61,7 @@ function peak_bold(gd, signal; peak_to = :all)
         if all(ismissing.(dd[:,signal]))
             return filter(r -> r.Area == "NoData",dd)
         else
-            i = findmax(skipmissing(dd[:,signal]))[2]
+            i = findmax(abs.(skipmissing(dd[:,signal])))[2]
             return peak_to == :all ? dd[i:end,:] : dd[i:peak_to,:]
         end
     end
@@ -98,7 +101,7 @@ function plot_bold(df0; nanmath = true, fconc = true, lim = (-0.4,0.7))
     #calculate mean repsonse over concentrations per area
     df = combine(groupby(df0,[:Area, :Stim, :Concentration, :Genotype]),  :Bold .=> [fmean, fsem] .=>[:mean, :sem])
     # identify regions with missing concentration info
-    res = combine(groupby(df,[:Area]), :mean => (m-> .!(any(isnan.(m)))) => :to_keep)
+    res = combine(groupby(df,[:Area]), :mean => (m-> !(any(isnan.(m)))) => :to_keep)
     to_keep = filter(r -> r.to_keep, res)[:,:Area]
     # prepare a grid plot with the results for each regions
     df.Color = [x ? :red : :black for x in df.Stim]
@@ -144,7 +147,7 @@ function odour_response(df0; farea = :none, fconc = true)
         f1 = @formula(Bold ~ 1 + Concentration*Area + (1|Mouse))
     end
     #replace NaN values used for plotting to missing for model
-    df1.Bold = [isnan(x) ? missing : x for x in df1.Bold]
+    # any(isnan.(df1.Bold)) && (df1.Bold = [isnan(x) ? missing : x for x in df1.Bold])
     # model fit and test
     m0 = fit(MixedModel, f0, df1)
     m1 = fit(MixedModel, f1, df1)
@@ -153,7 +156,7 @@ function odour_response(df0; farea = :none, fconc = true)
     res = DataFrame(Area = coefnames(m1), P = m1.pvalues, Z = m1.beta ./ m1.stderror)
     res2 = filter!(r -> occursin("Concentration & Area: ", r.Area), res)
     res2.Area = replace.(res2.Area, "Concentration & Area: " => "")
-    to_keep = filter(r -> r.P <= 0.049, res2)[:,:Area]
+    to_keep = filter(r -> r.P < 0.05, res2)[:,:Area]
 
     return m1, mp, to_keep
 end
@@ -168,44 +171,62 @@ farea is a vector of string specifying which areas showed a significant dose
 dependent response to odour concetration, found using odour_response function
 fconc allows to remove lowest concetration from the dataset
 """
-function stim_interaction(df0, farea; fconc = true)
+function stim_interaction(df0, farea; fconc = true, gamma = false)
     # filters area lacking concentration response identified by odour_response function
     df1 = filter(r -> r.Genotype == "sert" && r.Area in farea, df0)
     fconc && filter!(r -> r.Concentration != 0.0001, df0)
     # identify if the model requires to incorporate time
     if iscolumn(df0,:Time)
-        f1 = @formula(Bold ~ 1 + Time + Concentration*Area + Stim + (1+Time|Mouse))
-        f2 = @formula(Bold ~ 1 + Time + Concentration + Area + Stim + Concentration & Area + Concentration & Area & Stim + (1+Time|Mouse))
-        f3 = @formula(Bold ~ 1 + Time + Concentration*Area*Stim + (1+Time|Mouse))
+        f1 = @formula(Bold ~ 1 + Time + Concentration*Area + Stim + (1+Time|Mouse) + (1+Time|Area))
+        f2 = @formula(Bold ~ 1 + Time + Concentration + Area + Stim + Concentration & Area + Stim & Concentration + Concentration & Area & Stim + (1+Time|Mouse) + (1+Time|Area))
+        f3 = @formula(Bold ~ 1 + Time + Concentration*Area*Stim + (1+Time|Mouse) + (1+Time|Area))
+        # f1 = @formula(Bold ~ 1 + Time + Concentration*Area + (1+Time|Mouse) + (1+Time|Area))
+        # f2 = @formula(Bold ~ 1 + Time + Concentration + Area + Concentration & Area + Area & Stim + Concentration & Area & Stim + (1+Time|Mouse) + (1+Time|Area))
+        # f3 = @formula(Bold ~ 1 + Time + Concentration*Area*Stim + (1+Time|Mouse) + (1+Time|Area))
     else
-        f1 = @formula(Bold ~ 1 + Concentration*Area + Stim + (1|Mouse))
-        f2 = @formula(Bold ~ 1 + Concentration + Area + Stim + Concentration & Area + Concentration & Area & Stim + (1|Mouse))
-        f3 = @formula(Bold ~ 1 + Concentration*Area*Stim + (1|Mouse))
+        f1 = @formula(Bold ~ 1 + Concentration*Area + Stim + (1|Mouse) + (1|Area))
+        f2 = @formula(Bold ~ 1 + Concentration + Area + Stim + Concentration & Area + Stim & Concentration + Concentration & Area & Stim + (1|Mouse) + (1|Area))#(1 + Concentration + Area + Stim|Mouse))
+        f3 = @formula(Bold ~ 1 + Concentration*Area*Stim + (1|Mouse) + (1|Area))
     end
     #replace NaN values used for plotting to missing for model
-    df1.Bold = [isnan(x) ? missing : x for x in df1.Bold]
-    m1 = fit(MixedModel, f1,df1)
-    m2 = fit(MixedModel, f2,df1)
-    m3 = fit(MixedModel, f3,df1)
+    # df1.Bold = [isnan(x) ? missing : x for x in df1.Bold]
+    if gamma
+        m1 = GeneralizedLinearMixedModel(f1, df1, Gamma())
+        m2 = GeneralizedLinearMixedModel(f2, df1, Gamma())
+        m3 = GeneralizedLinearMixedModel(f3, df1, Gamma())
+    else
+        m1 = fit(MixedModel, f1,df1)
+        m2 = fit(MixedModel, f2,df1)
+        m3 = fit(MixedModel, f3,df1)
+    end
     p_simple = MixedModels.likelihoodratiotest(m1,m2)
     p_complex = MixedModels.likelihoodratiotest(m2,m3)
     res = model_res(m2)
     filter!(r -> occursin("Stim", r.Area), res)
     sort!(res,:P)
-    return df1, m2, p_simple, p_complex, res
+    return df1, m2, m3, p_simple, p_complex, res
 end
 
-function analysis_bold(df0, signal; fconc = true, av_pres = true, method = :Peak, peak_to = :all, nmax = 6, window = 4:12, nanmath = true, lim = (-0.4,0.7))
+function analysis_bold(df0, signal; fconc = true, av_pres = true, method = :Peak,
+        peak_to = :all, nmax = 6, window = 4:12,
+        nanmath = true, gamma = false, lim = (-0.4,0.7))
     #adjust bold signal
     bold_df = define_bold(df0,signal; method = method, av_pres = av_pres, peak_to = peak_to, nmax = nmax, window = window, nanmath = nanmath)
-    plt, plt_df, to_keep = plot_bold(bold_df; nanmath = true, fconc = fconc, lim = lim)
+    if method == :None
+        nanmath ? (fmean = safemean) : (fmean = mean)
+        dfplt = combine(groupby(bold_df,[:Area, :Stim, :Concentration, :Genotype, :Mouse]),  :Bold => (b-> fmean(skipmissing(b))) => :Bold)
+    else
+        dfplt = bold_df
+    end
+    plt, plt_df, to_keep = plot_bold(dfplt; nanmath = true, fconc = fconc, lim = lim)
     display(plot(plt..., size = (900*1.5,1200*1.5)))#layout = (6,3))
     ## find areas that respond to concentration
     m1, mp, to_keep2 = odour_response(bold_df; farea = to_keep, fconc = fconc)
     # assess stim concentration interaction
-    stim_df, m2, p_simple, p_complex, res = stim_interaction(bold_df, to_keep2; fconc = fconc)
+    stim_df, m2, m3, p_simple, p_complex, res = stim_interaction(bold_df, to_keep2; fconc = fconc, gamma = gamma)
     show(m2)
     show(p_simple)
+    show(m3)
     show(p_complex)
-    return bold_df, plt, plt_df, to_keep, m1, mp, to_keep2, stim_df, m2, p_simple, p_complex, res
+    return bold_df, plt, plt_df, to_keep, m1, mp, to_keep2, stim_df, m2, m3, p_simple, p_complex, res
 end
